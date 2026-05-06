@@ -13,17 +13,41 @@
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
 
+// ============================================================================
+// LLVM OPTIMIZATION PASS HEADERS
+// ============================================================================
+#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/Utils.h>
+#include <llvm/Transforms/InstCombine.h>
+#include <llvm/Transforms/IPO.h>
+
 #include <iostream>
 #include <sstream>
+#include <iomanip>
 
 namespace greencc {
+
+// ============================================================================
+// CONSTRUCTOR AND DESTRUCTOR
+// ============================================================================
 
 LLVMCodeGen::LLVMCodeGen()
     : context_(std::make_unique<llvm::LLVMContext>()),
       module_(std::make_unique<llvm::Module>("greencc_module", *context_)),
-      builder_(std::make_unique<llvm::IRBuilder<>>(*context_)) {}
+      builder_(std::make_unique<llvm::IRBuilder<>>(*context_)),
+      optLevel_(OptLevel::O2) {}
+
+LLVMCodeGen::LLVMCodeGen(OptLevel optLevel)
+    : context_(std::make_unique<llvm::LLVMContext>()),
+      module_(std::make_unique<llvm::Module>("greencc_module", *context_)),
+      builder_(std::make_unique<llvm::IRBuilder<>>(*context_)),
+      optLevel_(optLevel) {}
 
 LLVMCodeGen::~LLVMCodeGen() = default;
+
+// ============================================================================
+// TYPE AND HELPER METHODS
+// ============================================================================
 
 llvm::Type* LLVMCodeGen::getLLVMType(const std::string& typeName) {
     std::string t = typeName;
@@ -38,7 +62,6 @@ llvm::Type* LLVMCodeGen::getLLVMType(const std::string& typeName) {
     if (t == "void")   return llvm::Type::getVoidTy(*context_);
     if (t == "string") return llvm::PointerType::getUnqual(llvm::Type::getInt8Ty(*context_));
 
-    
     return llvm::Type::getInt32Ty(*context_);
 }
 
@@ -52,7 +75,6 @@ llvm::AllocaInst* LLVMCodeGen::createEntryBlockAlloca(
 void LLVMCodeGen::declarePrintf() {
     if (printfFunc_) return;
 
-    
     auto* charPtrTy = llvm::PointerType::getUnqual(llvm::Type::getInt8Ty(*context_));
     auto* printfTy = llvm::FunctionType::get(
         llvm::Type::getInt32Ty(*context_), {charPtrTy}, true );
@@ -77,8 +99,15 @@ llvm::Value* LLVMCodeGen::createPrintfCall(const std::string& fmt,
     return builder_->CreateCall(printfFunc_, args);
 }
 
+// ============================================================================
+// MAIN CODE GENERATION ENTRY POINT
+// ============================================================================
+
 std::string LLVMCodeGen::generate(Program& program) {
     program.accept(*this);
+
+    // Run LLVM IR-level optimization passes
+    runOptimizationPasses();
 
     std::string irStr;
     llvm::raw_string_ostream os(irStr);
@@ -142,14 +171,205 @@ void LLVMCodeGen::setHotVariables(const std::unordered_set<std::string>& hotVars
     hotVariables_ = hotVars;
 }
 
-void LLVMCodeGen::visit(Program& p) {
+// ============================================================================
+// LOW-LEVEL LLVM OPTIMIZATION PASSES
+// ============================================================================
+
+void LLVMCodeGen::printOptimizationHeader() const {
+    std::cout << "\n╔════════════════════════════════════════════════════════════╗\n";
+    std::cout << "║                                                            ║\n";
+    std::cout << "║        ⚡ LLVM LOW-LEVEL OPTIMIZATION PASSES ⚡           ║\n";
+    std::cout << "║                                                            ║\n";
     
+    switch (optLevel_) {
+        case OptLevel::O0:
+            std::cout << "║  Optimization Level: O0 (No optimization)               ║\n";
+            break;
+        case OptLevel::O1:
+            std::cout << "║  Optimization Level: O1 (Basic optimizations)          ║\n";
+            break;
+        case OptLevel::O2:
+            std::cout << "║  Optimization Level: O2 (Standard optimizations)       ║\n";
+            break;
+        case OptLevel::O3:
+            std::cout << "║  Optimization Level: O3 (Aggressive optimizations)     ║\n";
+            break;
+    }
+    
+    std::cout << "║                                                            ║\n";
+    std::cout << "╠════════════════════════════════════════════════════════════╣\n";
+}
+
+void LLVMCodeGen::printOptimizationFooter() const {
+    std::cout << "╠════════════════════════════════════════════════════════════╣\n";
+    std::cout << "║  ✓ Optimization completed!                                 ║\n";
+    std::cout << "║  Passes executed: " << std::setw(2) << passesExecuted_ 
+              << "                                           ║\n";
+    std::cout << "║  Time taken: " << std::fixed << std::setprecision(2) 
+              << std::setw(6) << optimizationTimeMs_ << " ms                               ║\n";
+    std::cout << "║                                                            ║\n";
+    std::cout << "╚════════════════════════════════════════════════════════════╝\n\n";
+}
+
+void LLVMCodeGen::runOptimizationPasses() {
+    // Skip optimization at O0
+    if (optLevel_ == OptLevel::O0) {
+        std::cout << "\n║  O0 Selected: Skipping optimizations\n\n";
+        return;
+    }
+
+    printOptimizationHeader();
+
+    auto startTime = std::chrono::high_resolution_clock::now();
+
+    llvm::legacy::PassManager pm;
+
+    // Select passes based on optimization level
+    switch (optLevel_) {
+        case OptLevel::O1:
+            addBasicPasses(pm);
+            break;
+        case OptLevel::O2:
+            addStandardPasses(pm);
+            break;
+        case OptLevel::O3:
+            addAggressivePasses(pm);
+            break;
+        default:
+            addStandardPasses(pm);
+            break;
+    }
+
+    // Run all passes
+    pm.run(*module_);
+
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        endTime - startTime);
+    optimizationTimeMs_ = duration.count();
+
+    printOptimizationFooter();
+}
+
+// ============================================================================
+// PASS REGISTRATION METHODS
+// ============================================================================
+
+void LLVMCodeGen::addMem2RegPass(llvm::legacy::PassManager& pm) {
+    std::cout << "║  [1/5] Mem2Reg (Promote Memory to Register)               ║\n";
+    pm.add(llvm::createPromoteMemoryToRegisterPass());
+    passesExecuted_++;
+}
+
+void LLVMCodeGen::addInstructionCombiningPass(llvm::legacy::PassManager& pm) {
+    std::cout << "║  [2/5] InstCombine (Instruction Pattern Matching)         ║\n";
+    pm.add(llvm::createInstructionCombiningPass());
+    passesExecuted_++;
+}
+
+void LLVMCodeGen::addValueNumberingPass(llvm::legacy::PassManager& pm) {
+    std::cout << "║  [3/5] GVN (Global Value Numbering)                       ║\n";
+    pm.add(llvm::createGVNPass());
+    passesExecuted_++;
+}
+
+void LLVMCodeGen::addControlFlowSimplificationPass(llvm::legacy::PassManager& pm) {
+    std::cout << "║  [4/5] CFGSimplify (Control Flow Optimization)            ║\n";
+    pm.add(llvm::createCFGSimplificationPass());
+    passesExecuted_++;
+}
+
+// ============================================================================
+// OPTIMIZATION LEVEL STRATEGIES
+// ============================================================================
+
+void LLVMCodeGen::addBasicPasses(llvm::legacy::PassManager& pm) {
+    std::cout << "║                                                            ║\n";
+    std::cout << "║  Basic Optimizations (O1):                                 ║\n";
+    std::cout << "║  ────────────────────────────────────────────────────────  ║\n";
+    addMem2RegPass(pm);
+    addInstructionCombiningPass(pm);
+    addControlFlowSimplificationPass(pm);
+}
+
+void LLVMCodeGen::addStandardPasses(llvm::legacy::PassManager& pm) {
+    std::cout << "║                                                            ║\n";
+    std::cout << "║  Standard Optimizations (O2):                              ║\n";
+    std::cout << "║  ────────────────────────────────────────────────────────  ║\n";
+    addMem2RegPass(pm);
+    addInstructionCombiningPass(pm);
+    addValueNumberingPass(pm);
+    addControlFlowSimplificationPass(pm);
+    
+    std::cout << "║  [5/5] Advanced Passes                                     ║\n";
+    pm.add(llvm::createEarlyCSEPass());
+    pm.add(llvm::createReassociatePass());
+    pm.add(llvm::createDeadCodeEliminationPass());
+    pm.add(llvm::createCorrelatedValuePropagationPass());
+    passesExecuted_ += 4;
+}
+
+void LLVMCodeGen::addAggressivePasses(llvm::legacy::PassManager& pm) {
+    std::cout << "║                                                            ║\n";
+    std::cout << "║  Aggressive Optimizations (O3):                            ║\n";
+    std::cout << "║  ────────────────────────────────────────────────────────  ║\n";
+    
+    // Core passes
+    addMem2RegPass(pm);
+    addInstructionCombiningPass(pm);
+    addValueNumberingPass(pm);
+    addControlFlowSimplificationPass(pm);
+    
+    // Advanced passes
+    std::cout << "║  [5/5] Advanced Passes:                                    ║\n";
+    pm.add(llvm::createEarlyCSEPass());
+    pm.add(llvm::createReassociatePass());
+    pm.add(llvm::createDeadCodeEliminationPass());
+    pm.add(llvm::createCorrelatedValuePropagationPass());
+    passesExecuted_ += 4;
+    
+    // Loop optimizations
+    std::cout << "║  [6/6] Loop Optimizations:                                 ║\n";
+    pm.add(llvm::createLoopSimplifyPass());
+    pm.add(llvm::createLICMPass());
+    pm.add(llvm::createLoopUnrollPass());
+    passesExecuted_ += 3;
+    
+    // Vectorization
+    std::cout << "║  [7/7] Vectorization:                                      ║\n";
+    pm.add(llvm::createSLPVectorizerPass());
+    passesExecuted_++;
+}
+
+void LLVMCodeGen::printOptimizationStats() const {
+    std::cout << "\n╔════════════════════════════════════════════════════════════╗\n";
+    std::cout << "║          🔧 OPTIMIZATION STATISTICS 🔧                    ║\n";
+    std::cout << "╠════════════════════════════════════════════════════════════╣\n";
+    std::cout << "║  Optimization Level: ";
+    switch (optLevel_) {
+        case OptLevel::O0: std::cout << "O0 (No optimization)"; break;
+        case OptLevel::O1: std::cout << "O1 (Basic)"; break;
+        case OptLevel::O2: std::cout << "O2 (Standard)"; break;
+        case OptLevel::O3: std::cout << "O3 (Aggressive)"; break;
+    }
+    std::cout << "                 ║\n";
+    std::cout << "║  Passes Executed: " << std::setw(2) << passesExecuted_ 
+              << "                                       ║\n";
+    std::cout << "║  Optimization Time: " << std::fixed << std::setprecision(2) 
+              << std::setw(6) << optimizationTimeMs_ << " ms                        ║\n";
+    std::cout << "╚════════════════════════════════════════════════════════════╝\n";
+}
+
+// ============================================================================
+// VISITOR METHODS (AST TRAVERSAL FOR IR GENERATION)
+// ============================================================================
+
+void LLVMCodeGen::visit(Program& p) {
     module_->setModuleIdentifier("GreenCC Energy-Optimized Module");
 
-    
+    // First pass: declare all functions
     for (auto& decl : p.declarations) {
         if (auto* fn = dynamic_cast<FunctionDecl*>(decl.get())) {
-            
             std::vector<llvm::Type*> paramTypes;
             for (auto& param : fn->params) {
                 paramTypes.push_back(getLLVMType(param.typeName));
@@ -161,7 +381,7 @@ void LLVMCodeGen::visit(Program& p) {
         }
     }
 
-    
+    // Second pass: implement functions
     for (auto& decl : p.declarations) {
         decl->accept(*this);
     }
@@ -173,15 +393,12 @@ void LLVMCodeGen::visit(FunctionDecl& f) {
 
     currentFunction_ = fn;
 
-    
     auto* entryBB = llvm::BasicBlock::Create(*context_, "entry", fn);
     builder_->SetInsertPoint(entryBB);
 
-    
     auto savedValues = namedValues_;
     namedValues_.clear();
 
-    
     unsigned i = 0;
     for (auto& arg : fn->args()) {
         arg.setName(f.params[i].name);
@@ -191,16 +408,13 @@ void LLVMCodeGen::visit(FunctionDecl& f) {
         i++;
     }
 
-    
     if (f.body) {
         for (auto& stmt : f.body->stmts) {
             stmt->accept(*this);
-            
             if (builder_->GetInsertBlock()->getTerminator()) break;
         }
     }
 
-    
     if (!builder_->GetInsertBlock()->getTerminator()) {
         if (fn->getReturnType()->isVoidTy()) {
             builder_->CreateRetVoid();
@@ -209,12 +423,10 @@ void LLVMCodeGen::visit(FunctionDecl& f) {
         }
     }
 
-    
     if (llvm::verifyFunction(*fn, &llvm::errs())) {
         std::cerr << "Warning: function '" << f.name << "' verification failed\n";
     }
 
-    
     namedValues_ = savedValues;
     currentFunction_ = nullptr;
 }
@@ -241,7 +453,7 @@ void LLVMCodeGen::visit(VarDecl& s) {
         auto* alloca = createEntryBlockAlloca(currentFunction_, s.name, type);
         namedValues_[s.name] = alloca;
 
-        
+        // Apply energy-aware register optimization hints
         if (hotVariables_.count(s.name)) {
             auto* mdNode = llvm::MDNode::get(*context_, {
                 llvm::ConstantAsMetadata::get(
@@ -253,7 +465,6 @@ void LLVMCodeGen::visit(VarDecl& s) {
         if (s.init) {
             s.init->accept(*this);
             if (lastValue_) {
-                
                 if (lastValue_->getType() != type) {
                     if (type->isIntegerTy() && lastValue_->getType()->isIntegerTy()) {
                         lastValue_ = builder_->CreateIntCast(lastValue_, type, true);
@@ -269,7 +480,6 @@ void LLVMCodeGen::visit(IfStmt& s) {
     s.condition->accept(*this);
     llvm::Value* condV = lastValue_;
 
-    
     if (!condV->getType()->isIntegerTy(1)) {
         condV = builder_->CreateICmpNE(
             condV, llvm::ConstantInt::get(condV->getType(), 0), "ifcond");
@@ -286,13 +496,11 @@ void LLVMCodeGen::visit(IfStmt& s) {
         builder_->CreateCondBr(condV, thenBB, mergeBB);
     }
 
-    
     builder_->SetInsertPoint(thenBB);
     s.thenBranch->accept(*this);
     if (!builder_->GetInsertBlock()->getTerminator())
         builder_->CreateBr(mergeBB);
 
-    
     if (s.elseBranch) {
         fn->insert(fn->end(), elseBB);
         builder_->SetInsertPoint(elseBB);
@@ -301,7 +509,6 @@ void LLVMCodeGen::visit(IfStmt& s) {
             builder_->CreateBr(mergeBB);
     }
 
-    
     fn->insert(fn->end(), mergeBB);
     builder_->SetInsertPoint(mergeBB);
 }
@@ -319,7 +526,6 @@ void LLVMCodeGen::visit(WhileStmt& s) {
 
     builder_->CreateBr(condBB);
 
-    
     builder_->SetInsertPoint(condBB);
     s.condition->accept(*this);
     llvm::Value* condV = lastValue_;
@@ -329,14 +535,12 @@ void LLVMCodeGen::visit(WhileStmt& s) {
     }
     builder_->CreateCondBr(condV, bodyBB, exitBB);
 
-    
     fn->insert(fn->end(), bodyBB);
     builder_->SetInsertPoint(bodyBB);
     s.body->accept(*this);
     if (!builder_->GetInsertBlock()->getTerminator())
         builder_->CreateBr(condBB);
 
-    
     fn->insert(fn->end(), exitBB);
     builder_->SetInsertPoint(exitBB);
 
@@ -347,7 +551,6 @@ void LLVMCodeGen::visit(WhileStmt& s) {
 void LLVMCodeGen::visit(ForStmt& s) {
     auto* fn = builder_->GetInsertBlock()->getParent();
 
-    
     if (s.init) s.init->accept(*this);
 
     auto* condBB = llvm::BasicBlock::Create(*context_, "for.cond", fn);
@@ -362,7 +565,6 @@ void LLVMCodeGen::visit(ForStmt& s) {
 
     builder_->CreateBr(condBB);
 
-    
     builder_->SetInsertPoint(condBB);
     if (s.condition) {
         s.condition->accept(*this);
@@ -373,23 +575,20 @@ void LLVMCodeGen::visit(ForStmt& s) {
         }
         builder_->CreateCondBr(condV, bodyBB, exitBB);
     } else {
-        builder_->CreateBr(bodyBB); 
+        builder_->CreateBr(bodyBB);
     }
 
-    
     fn->insert(fn->end(), bodyBB);
     builder_->SetInsertPoint(bodyBB);
     s.body->accept(*this);
     if (!builder_->GetInsertBlock()->getTerminator())
         builder_->CreateBr(incBB);
 
-    
     fn->insert(fn->end(), incBB);
     builder_->SetInsertPoint(incBB);
     if (s.update) s.update->accept(*this);
     builder_->CreateBr(condBB);
 
-    
     fn->insert(fn->end(), exitBB);
     builder_->SetInsertPoint(exitBB);
 
@@ -445,7 +644,6 @@ void LLVMCodeGen::visit(LiteralExpr& e) {
                 llvm::Type::getInt1Ty(*context_), e.value == "true" ? 1 : 0);
             break;
         case LiteralExpr::CHAR: {
-            
             char c = e.value.length() >= 3 ? e.value[1] : '\0';
             if (c == '\\' && e.value.length() >= 4) {
                 switch (e.value[2]) {
@@ -461,7 +659,6 @@ void LLVMCodeGen::visit(LiteralExpr& e) {
             break;
         }
         case LiteralExpr::STRING: {
-            
             std::string str = e.value.substr(1, e.value.size() - 2);
             lastValue_ = getOrCreateString(str);
             break;
@@ -475,7 +672,6 @@ void LLVMCodeGen::visit(VarExpr& e) {
         auto* alloca = it->second;
         lastValue_ = builder_->CreateLoad(alloca->getAllocatedType(), alloca, e.name);
     } else {
-        
         lastValue_ = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0);
     }
 }
@@ -488,7 +684,6 @@ void LLVMCodeGen::visit(BinaryExpr& e) {
 
     if (!L || !R) { lastValue_ = nullptr; return; }
 
-    
     if (L->getType() != R->getType()) {
         if (L->getType()->isIntegerTy() && R->getType()->isIntegerTy()) {
             if (L->getType()->getIntegerBitWidth() < R->getType()->getIntegerBitWidth())
@@ -560,7 +755,6 @@ void LLVMCodeGen::visit(BinaryExpr& e) {
                                   : builder_->CreateICmpSGE(L, R, "getmp");
             break;
         case TokenType::AND_AND: {
-            
             L = builder_->CreateICmpNE(L, llvm::ConstantInt::get(L->getType(), 0));
             R = builder_->CreateICmpNE(R, llvm::ConstantInt::get(R->getType(), 0));
             lastValue_ = builder_->CreateAnd(L, R, "andtmp");
@@ -599,8 +793,6 @@ void LLVMCodeGen::visit(UnaryExpr& e) {
             lastValue_ = builder_->CreateNot(V, "bnottmp");
             break;
         case TokenType::PLUS_PLUS: {
-            
-            
             auto* operandVar = dynamic_cast<VarExpr*>(e.operand.get());
             if (operandVar) {
                 auto it = namedValues_.find(operandVar->name);
@@ -642,10 +834,8 @@ void LLVMCodeGen::visit(AssignExpr& e) {
     auto* alloca = it->second;
     auto* allocaType = alloca->getAllocatedType();
 
-    
     if (e.op != TokenType::EQ) {
         auto* current = builder_->CreateLoad(allocaType, alloca, e.target);
-        
         if (val->getType() != current->getType() &&
             val->getType()->isIntegerTy() && current->getType()->isIntegerTy()) {
             val = builder_->CreateIntCast(val, current->getType(), true);
@@ -659,7 +849,6 @@ void LLVMCodeGen::visit(AssignExpr& e) {
         }
     }
 
-    
     if (val->getType() != allocaType) {
         if (allocaType->isIntegerTy() && val->getType()->isIntegerTy()) {
             val = builder_->CreateIntCast(val, allocaType, true);
@@ -682,7 +871,6 @@ void LLVMCodeGen::visit(CallExpr& e) {
     for (size_t i = 0; i < e.args.size(); i++) {
         e.args[i]->accept(*this);
         llvm::Value* argVal = lastValue_;
-        
         if (i < callee->arg_size() && argVal) {
             auto* paramType = callee->getArg(i)->getType();
             if (argVal->getType() != paramType) {
@@ -730,7 +918,6 @@ void LLVMCodeGen::visit(IOExpr& e) {
     declarePrintf();
 
     if (e.isOutput) {
-        
         for (auto& op : e.operands) {
             if (auto* var = dynamic_cast<VarExpr*>(op.get())) {
                 if (var->name == "endl") {
@@ -749,7 +936,6 @@ void LLVMCodeGen::visit(IOExpr& e) {
                     llvm::Type::getInt32Ty(*context_));
                 createPrintfCall("%d", {ext});
             } else if (lastValue_->getType()->isFloatingPointTy()) {
-                
                 if (lastValue_->getType()->isFloatTy()) {
                     lastValue_ = builder_->CreateFPExt(lastValue_,
                         llvm::Type::getDoubleTy(*context_));
@@ -761,12 +947,9 @@ void LLVMCodeGen::visit(IOExpr& e) {
                 createPrintfCall("%c", {lastValue_});
             }
         }
-    } else {
-        
-        
     }
 
     lastValue_ = nullptr;
 }
 
-} 
+} // namespace greencc
